@@ -133,13 +133,17 @@ def _serper_search_texts(query, timeout=20):
     api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
-    # Try the full query, then just the place name (first part).
+    # Try the full query, then just the place name, then site-restricted
+    # searches on Indian PIN/village directories (best hamlet coverage).
     queries = [(query or "").strip() + " pincode"]
     place = (query or "").split(",")[0].strip()
-    if place and place.lower() not in queries[0].lower():
+    if place:
         queries.append(place + " village pincode")
+        # Site-restricted: these directories index hamlets well.
+        queries.append(f"site:indiainfo.net {place} pincode")
+        queries.append(f"site:onefivenine.com {place} pincode")
     texts = []
-    for q in queries[:2]:
+    for q in queries[:4]:
         url = "https://google.serper.dev/search"
         body = json.dumps({"q": q, "num": 5}).encode("utf-8")
         try:
