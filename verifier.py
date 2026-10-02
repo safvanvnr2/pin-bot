@@ -226,11 +226,14 @@ def _verify_via_web_search(query, db_path, llm=None):
     texts = _tavily_search_texts(query)
     qn = _norm(query)
     # Pattern 1: Explicit "X Pin code is 123456" statement.
+    # Handles: "Kodimaram Pin code is 676508", "Pincode of Kodimaram is 676508"
     for text in texts:
-        # Find "Pin code is 679333" with place name before it.
-        for m in re.finditer(r"(\w[\w\s]{2,40}?)\s+pin\s*code\s+is\s+([1-9][0-9]{5})",
-                             text, re.I):
-            place, pin = m.group(1).strip(), m.group(2)
+        for m in re.finditer(
+                r"(?:pin\s*code\s+(?:of\s+)?([\w\s,]{2,40}?)\s+is\s+"
+                r"|([\w\s,]{2,40}?)\s+pin\s*code\s+is\s+)"
+                r"([1-9][0-9]{5})", text, re.I):
+            place = (m.group(1) or m.group(2) or "").strip()
+            pin = m.group(3)
             # The place name should resemble our query.
             if _norm(place) and (_norm(place) in qn or qn in _norm(place) or
                 any(t in _norm(place) for t in qn.split() if len(t) > 4)):
@@ -272,11 +275,20 @@ def _verify_via_web_search(query, db_path, llm=None):
                     "district": o.get("District", ""),
                     "state": o.get("State", ""),
                 }
-    # Pattern 3: PIN candidates cross-checked against postal data.
-    # Use the web text's district mention to validate.
+    # Pattern 3: PIN near the place name in text (proximity check).
+    # The PIN must appear within 100 chars of a query token to avoid
+    # picking up unrelated PINs mentioned elsewhere in the results.
+    q_tokens = [t for t in qn.split() if len(t) > 3]
     for text in texts:
-        pins = re.findall(r"\b([1-9][0-9]{5})\b", text)
-        for pin in dict.fromkeys(pins):  # dedupe, keep order
+        text_n = _norm(text)
+        for m in re.finditer(r"\b([1-9][0-9]{5})\b", text):
+            pin = m.group(1)
+            # Check proximity: is a query token within 100 chars?
+            start = max(0, m.start() - 100)
+            end = min(len(text), m.end() + 100)
+            window = _norm(text[start:end])
+            if not any(t in window for t in q_tokens):
+                continue
             try:
                 offices = _api_pincode(pin) or []
             except Exception:
@@ -287,7 +299,7 @@ def _verify_via_web_search(query, db_path, llm=None):
             district = _norm(o.get("District", ""))
             # The web text should mention the PIN's district.
             if district and re.search(r"\b" + re.escape(district) + r"\b",
-                                      _norm(text)):
+                                      text_n):
                 print(f"web verified: {pin} ({o.get('Name')})", flush=True)
                 return {
                     "pincode": pin,
