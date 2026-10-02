@@ -128,30 +128,37 @@ def _serper_search_texts(query, timeout=20):
     """Web search via Serper API (Google results; free 2.5k/mo, no card).
 
     Needs SERPER_API_KEY. Returns list of (title + snippet) strings.
+    Tries multiple query formulations for better coverage.
     """
     api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
-    url = "https://google.serper.dev/search"
-    body = json.dumps({
-        "q": (query or "").strip() + " pincode",
-        "num": 5,
-    }).encode("utf-8")
-    try:
-        req = urllib.request.Request(url, data=body, headers={
-            "X-API-KEY": api_key,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        print(f"serper search error: {type(e).__name__}: {e}", flush=True)
-        return []
+    # Try the full query, then just the place name (first part).
+    queries = [(query or "").strip() + " pincode"]
+    place = (query or "").split(",")[0].strip()
+    if place and place.lower() not in queries[0].lower():
+        queries.append(place + " village pincode")
     texts = []
-    for res in data.get("organic", []):
-        texts.append(str(res.get("title", "")) + " " +
-                     str(res.get("snippet", ""))[:500])
+    for q in queries[:2]:
+        url = "https://google.serper.dev/search"
+        body = json.dumps({"q": q, "num": 5}).encode("utf-8")
+        try:
+            req = urllib.request.Request(url, data=body, headers={
+                "X-API-KEY": api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            print(f"serper search error: {type(e).__name__}: {e}", flush=True)
+            continue
+        for res in data.get("organic", []):
+            texts.append(str(res.get("title", "")) + " " +
+                         str(res.get("snippet", ""))[:500])
+        # If we found the place name in results, stop.
+        if any(place.lower() in t.lower() for t in texts if place):
+            break
     if not texts:
         print(f"serper: no results for '{query}'", flush=True)
     return texts
