@@ -52,9 +52,37 @@ class GeminiClient:
     def available(self):
         return bool(self.api_key)
 
-    def _generate(self, parts, use_search=False, timeout=120):
-        if not self.api_key:
+    def _discover_model(self):
+        """Find a working generateContent model (model names change over time)."""
+        try:
+            r = requests.get(f"{API_BASE}/models",
+                             params={"key": self.api_key},
+                             timeout=30)
+            r.raise_for_status()
+            models = r.json().get("models", [])
+        except Exception as e:
+            print(f"Gemini model discovery failed: {type(e).__name__}: {e}",
+                  flush=True)
             return None
+        cands = []
+        for m in models:
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+            name = str(m.get("name", "")).split("/")[-1]
+            if not name:
+                continue
+            # Prefer flash (fast, free-tier friendly), then pro, then others.
+            rank = (0 if "flash" in name else 1 if "pro" in name else 2)
+            cands.append((rank, name))
+        cands.sort()
+        if cands:
+            print(f"Gemini: discovered model {cands[0][1]}", flush=True)
+            return cands[0][1]
+        return None
+
+    def _try_generate(self, parts, use_search, timeout):
+        """One API attempt. Returns parsed JSON, None on error,
+        or 'MODEL_NOT_FOUND' on 404."""
         url = f"{API_BASE}/models/{self.model}:generateContent"
         body = {
             "contents": [{"parts": parts}],
@@ -68,6 +96,8 @@ class GeminiClient:
         try:
             r = requests.post(url, params={"key": self.api_key},
                               json=body, timeout=timeout)
+            if r.status_code == 404:
+                return "MODEL_NOT_FOUND"
             if r.status_code == 429:
                 print("Gemini: rate limited (429); degrading to "
                       "deterministic lookup.", flush=True)
@@ -83,6 +113,21 @@ class GeminiClient:
             print("Gemini: unexpected response shape.", flush=True)
             return None
         return _parse_json(text)
+
+    def _generate(self, parts, use_search=False, timeout=120):
+        if not self.api_key:
+            return None
+        result = self._try_generate(parts, use_search, timeout)
+        if result != "MODEL_NOT_FOUND":
+            return result
+        # Model name outdated -> discover a working one and retry once.
+        print(f"Gemini: model {self.model} not found; discovering...",
+              flush=True)
+        new_model = self._discover_model()
+        if not new_model or new_model == self.model:
+            return None
+        self.model = new_model
+        return self._try_generate(parts, use_search, timeout)
 
     # ------------------------------------------------------------------
     # Vision: extract addresses from images / documents
