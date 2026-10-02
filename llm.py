@@ -112,7 +112,11 @@ class GeminiClient:
         except (KeyError, IndexError, TypeError):
             print("Gemini: unexpected response shape.", flush=True)
             return None
-        return _parse_json(text)
+        parsed = _parse_json(text)
+        if parsed is None:
+            print(f"Gemini: non-JSON response (first 200 chars): {text[:200]}",
+                  flush=True)
+        return parsed
 
     def _generate(self, parts, use_search=False, timeout=120):
         if not self.api_key:
@@ -220,6 +224,7 @@ class GeminiClient:
             use_search=True,
             timeout=150,
         )
+        print(f"Gemini verify result: {str(out)[:250]}", flush=True)
         if not isinstance(out, dict):
             return None
         pin = str(out.get("pincode") or "").strip()
