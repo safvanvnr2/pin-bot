@@ -275,38 +275,7 @@ def _verify_via_web_search(query, db_path, llm=None):
                     "district": o.get("District", ""),
                     "state": o.get("State", ""),
                 }
-    # Pattern 3: PIN near the place name in text (proximity check).
-    # The PIN must appear within 100 chars of a query token to avoid
-    # picking up unrelated PINs mentioned elsewhere in the results.
-    q_tokens = [t for t in qn.split() if len(t) > 3]
-    for text in texts:
-        text_n = _norm(text)
-        for m in re.finditer(r"\b([1-9][0-9]{5})\b", text):
-            pin = m.group(1)
-            # Check proximity: is a query token within 100 chars?
-            start = max(0, m.start() - 100)
-            end = min(len(text), m.end() + 100)
-            window = _norm(text[start:end])
-            if not any(t in window for t in q_tokens):
-                continue
-            try:
-                offices = _api_pincode(pin) or []
-            except Exception:
-                offices = []
-            if not offices:
-                continue
-            o = offices[0]
-            district = _norm(o.get("District", ""))
-            # The web text should mention the PIN's district.
-            if district and re.search(r"\b" + re.escape(district) + r"\b",
-                                      text_n):
-                print(f"web verified: {pin} ({o.get('Name')})", flush=True)
-                return {
-                    "pincode": pin,
-                    "post_office": o.get("Name", ""),
-                    "district": o.get("District", ""),
-                    "state": o.get("State", ""),
-                }
+    # (No loose regex fallback — a wrong PIN is worse than "unverified".)
     return None
 
 
