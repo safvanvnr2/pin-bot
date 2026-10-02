@@ -33,11 +33,11 @@ APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
 DB_PATH = os.environ.get("PINCODE_DB", os.path.join("data", "pincodes.db"))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
-if TAVILY_KEY:
-    print("Tavily web search: configured.", flush=True)
+SERPER_KEY = os.environ.get("SERPER_API_KEY", "").strip()
+if SERPER_KEY:
+    print("Serper web search: configured.", flush=True)
 else:
-    print("NOTE: TAVILY_API_KEY not set — web search disabled.", flush=True)
+    print("NOTE: SERPER_API_KEY not set — web search disabled.", flush=True)
 
 GRAPH = "https://graph.facebook.com/v21.0"
 

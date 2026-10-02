@@ -124,55 +124,39 @@ def _cross_check_pin(pincode, query, db_path, web_district="", web_state=""):
     return False
 
 
-def _tavily_search_texts(query, timeout=20):
-    """Web search via Tavily API (free 1k/month, no card; needs TAVILY_API_KEY).
+def _serper_search_texts(query, timeout=20):
+    """Web search via Serper API (Google results; free 2.5k/mo, no card).
 
-    Returns list of (title + snippet) strings.
+    Needs SERPER_API_KEY. Returns list of (title + snippet) strings.
     """
-    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
-    url = "https://api.tavily.com/search"
+    url = "https://google.serper.dev/search"
     body = json.dumps({
-        "api_key": api_key,
-        "query": (query or "").strip() + " pincode",
-        "max_results": 5,
-        "include_answer": False,
+        "q": (query or "").strip() + " pincode",
+        "num": 5,
     }).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=body, headers={
+            "X-API-KEY": api_key,
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0",
         })
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
     except Exception as e:
-        print(f"tavily search error: {type(e).__name__}: {e}", flush=True)
+        print(f"serper search error: {type(e).__name__}: {e}", flush=True)
         return []
     texts = []
-    for res in data.get("results", []):
+    for res in data.get("organic", []):
         texts.append(str(res.get("title", "")) + " " +
-                     str(res.get("content", ""))[:500])
+                     str(res.get("snippet", ""))[:500])
     if not texts:
-        print(f"tavily: no results for '{query}'", flush=True)
+        print(f"serper: no results for '{query}'", flush=True)
     return texts
 
 
-def web_search_pins(query, timeout=20):
-    """Live web search for PIN candidates (Tavily API; free, no card).
-
-    Returns 6-digit PINs found in search results, in order of appearance.
-    """
-    pins = []
-    # Tavily Search API (reliable, needs TAVILY_API_KEY).
-    for text in _tavily_search_texts(query, timeout):
-        pins.extend(re.findall(r"\b([1-9][0-9]{5})\b", text))
-    seen, out = set(), []
-    for p in pins:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out[:10]
 
 
 def _spelling_variations(token):
@@ -223,7 +207,7 @@ def _verify_via_web_search(query, db_path, llm=None):
     Returns dict(pincode, post_office, district, state) or None.
     """
     # Get full search texts (not just PINs) for smarter matching.
-    texts = _tavily_search_texts(query)
+    texts = _serper_search_texts(query)
     qn = _norm(query)
     # Pattern 1: Explicit "X Pin code is 123456" statement.
     # Handles: "Kodimaram Pin code is 676508", "Pincode of Kodimaram is 676508"
