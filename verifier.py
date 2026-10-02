@@ -221,23 +221,28 @@ def _verify_via_web_search(query, db_path):
                         "state": o.get("State", ""),
                     }
     # Pattern 2: PIN candidates cross-checked against postal data.
-    for pin in web_search_pins(query):
-        if not _cross_check_pin(pin, query, db_path):
-            continue
-        try:
-            offices = _api_pincode(pin) or []
-        except Exception:
-            offices = []
-        if not offices:
-            continue
-        o = offices[0]
-        print(f"web verified: {pin} ({o.get('Name')})", flush=True)
-        return {
-            "pincode": pin,
-            "post_office": o.get("Name", ""),
-            "district": o.get("District", ""),
-            "state": o.get("State", ""),
-        }
+    # Use the web text's district mention to validate.
+    for text in texts:
+        pins = re.findall(r"\b([1-9][0-9]{5})\b", text)
+        for pin in dict.fromkeys(pins):  # dedupe, keep order
+            try:
+                offices = _api_pincode(pin) or []
+            except Exception:
+                offices = []
+            if not offices:
+                continue
+            o = offices[0]
+            district = _norm(o.get("District", ""))
+            # The web text should mention the PIN's district.
+            if district and re.search(r"\b" + re.escape(district) + r"\b",
+                                      _norm(text)):
+                print(f"web verified: {pin} ({o.get('Name')})", flush=True)
+                return {
+                    "pincode": pin,
+                    "post_office": o.get("Name", ""),
+                    "district": o.get("District", ""),
+                    "state": o.get("State", ""),
+                }
     return None
 
 
