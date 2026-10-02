@@ -88,6 +88,14 @@ STATES = {
 
 DIRECTIONS = {"east", "west", "north", "south"}
 
+# Generic words that return junk as solo API queries and must not decide a
+# match on vagueness (they still count inside the full-phrase query).
+SOLO_QUERY_SKIP = {
+    "railway", "station", "road", "street", "nagar", "market", "bazar",
+    "bazaar", "chowk", "lane", "colony", "extension", "extn", "gpo",
+    "municipality", "panchayat", "corporation", "town", "city", "village",
+}
+
 _DB_SETS = {}
 
 
@@ -176,14 +184,53 @@ def _api_search(name):
     return data[0].get("PostOffice") or []
 
 
+def _api_pincode(pin):
+    """Look up a PIN directly via the live API (anti-hallucination check)."""
+    try:
+        url = f"https://api.postalpincode.in/pincode/{pin}"
+        req = urllib.request.Request(url, headers={"User-Agent": "pin-bot/1.0"})
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None  # network failure
+    if not data or data[0].get("Status") != "Success":
+        return []
+    return data[0].get("PostOffice") or []
+
+
+def _distinctive(tokens):
+    """Tokens that carry place identity (generic words excluded)."""
+    d = {t for t in tokens if t not in SOLO_QUERY_SKIP}
+    return d or set(tokens)
+
+
+def _name_hit(dist_tokens, name_toks, phrase, name_norm):
+    """Does the office name plausibly match the address locality?"""
+    for t in dist_tokens:
+        if t in name_toks:
+            return True
+        for nt in name_toks:
+            if len(t) >= 4 and len(nt) >= 4 and \
+               difflib.SequenceMatcher(None, t, nt).ratio() > 0.85:
+                return True  # minor spelling variation / typo
+    # Alias case: "t nagar" -> "thygarayanagar" must hit "Thygarayanagar".
+    if phrase and name_norm and len(phrase) >= 4 and len(name_norm) >= 4:
+        if phrase == name_norm or phrase in name_norm or name_norm in phrase:
+            return True
+    return False
+
+
 def _score_office(office, locality_phrase, locality_tokens,
                   district_keys, state_keys):
     name = _norm(office.get("Name", ""))
     name_toks = set(name.split())
     lt = set(locality_tokens)
+    # Distinctive tokens drive the match; generic words (station, road…)
+    # must not let a wrong office win on vagueness.
+    dist_lt = _distinctive(lt)
 
     ratio = difflib.SequenceMatcher(None, locality_phrase, name).ratio()
-    overlap = len(lt & name_toks) / max(len(lt), 1)
+    overlap = len(dist_lt & name_toks) / max(len(dist_lt), 1)
 
     score = 5 * ratio + 4 * overlap
 
@@ -219,24 +266,81 @@ def _score_office(office, locality_phrase, locality_tokens,
     return round(score, 2)
 
 
-def _collect(queries, phrase, locality, district_keys, state_keys):
-    """Run API queries, score every office, return sorted (score, office)."""
-    seen, scored = set(), []
+def _gather_offices(queries):
+    """Run API queries; return deduped office list, None on network failure."""
+    seen, offices = set(), []
     for q in queries:
-        offices = _api_search(q)
-        if offices is None:
+        result = _api_search(q)
+        if result is None:
             return None  # network failure signal
-        for o in offices:
+        for o in result:
             key = (o.get("Name"), o.get("Pincode"))
             if key in seen:
                 continue
             seen.add(key)
-            scored.append((_score_office(o, phrase, locality,
-                                         district_keys, state_keys), o))
-        if scored and max(s for s, _ in scored) >= 9:
-            break  # strong hit; no need for more queries
-    scored.sort(key=lambda x: -x[0])
-    return scored
+            offices.append(o)
+    return offices
+
+
+def _discover_districts(offices, query_norm, district_keys):
+    """Find district names mentioned in the query among returned offices.
+
+    The offline DB covers only part of India, so the API's own district
+    naming fills the gaps (e.g. Malappuram, which the DB lacks).
+    """
+    known = {d for _, d in district_keys}
+    for o in offices:
+        d = _norm(o.get("District", ""))
+        if not d or len(d) < 3 or d in known:
+            continue
+        if re.search(r"\b" + re.escape(d) + r"\b", query_norm):
+            district_keys.append((d, d))
+            known.add(d)
+    return district_keys
+
+
+def _pick_head_office(offices, district_keys, state_keys):
+    """Select the district's head post office from gathered offices.
+
+    Used when no locality office matched confidently (e.g. "MG Road,
+    Bengaluru" -> Bangalore 560001, "Connaught Place, New Delhi" -> 110001).
+    Prefers offices whose district exactly matches, then names matching the
+    district itself, then GPO/head/general offices.
+    """
+    for _tok, ds in district_keys:
+        exact = [o for o in offices if _norm(o.get("District", "")) == ds]
+        cands = exact or [o for o in offices
+                          if ds in _norm(o.get("District", ""))]
+        if not cands:
+            continue
+        def _k(o):
+            nm = _norm(o.get("Name", ""))
+            return (0 if nm == ds else
+                    1 if any(k in nm for k in ("gpo", "head", "general"))
+                    else 2, nm)
+        cands.sort(key=_k)
+        o = cands[0]
+        # Don't crown a random office: it must look like a head office.
+        nm = _norm(o.get("Name", ""))
+        if not (nm == ds or any(k in nm for k in ("gpo", "head", "general"))):
+            continue
+        s = _score_office(o, ds, [ds], district_keys, state_keys)
+        return (s, True, o)
+    return None
+    """Find district names mentioned in the query among returned offices.
+
+    The offline DB covers only part of India, so the API's own district
+    naming fills the gaps (e.g. Malappuram, which the DB lacks).
+    """
+    known = {d for _, d in district_keys}
+    for o in offices:
+        d = _norm(o.get("District", ""))
+        if not d or len(d) < 3 or d in known:
+            continue
+        if re.search(r"\b" + re.escape(d) + r"\b", query_norm):
+            district_keys.append((d, d))
+            known.add(d)
+    return district_keys
 
 
 def _from_api(address, db_path):
@@ -246,50 +350,105 @@ def _from_api(address, db_path):
     if not locality and not district_keys:
         return []
 
-    phrase = " ".join(locality)
-    phrase = LOCALITY_ALIASES.get(phrase, phrase)
-    scored = _collect([phrase] + locality, phrase, locality,
-                      district_keys, state_keys)
-    if scored is None:
+    # Pass 1: gather candidate offices (accuracy > speed: no early break).
+    # District names stay in the queries for recall, and known districts are
+    # queried too so their head offices are available for the fallback.
+    query_phrase = " ".join(locality)
+    query_phrase = LOCALITY_ALIASES.get(query_phrase, query_phrase)
+    queries = ([query_phrase]
+               + [t for t in locality if t not in SOLO_QUERY_SKIP]
+               + [ds for _, ds in district_keys])
+    queries = list(dict.fromkeys(queries))  # dedupe, keep order
+    offices = _gather_offices(queries)
+    if offices is None:
         return None
 
-    # Fallback: search by district and take the head post office, so that
-    # "MG Road, Bengaluru" still resolves to the area's main PIN (560001)
-    # when no office is named after the street itself.
-    confident_best = max([s for s, _ in scored], default=-99) >= 6
-    if not confident_best and district_keys:
-        for _, ds in district_keys:
-            extra = _collect([ds], ds, [ds], district_keys, state_keys)
-            if extra is None:
-                return None
-            # Prefer the head office: its name matches the district itself
-            # (e.g. "Bangalore" -> 560001), then GPO/head/general offices.
-            def _fb_key(item):
-                s, o = item
-                nm = _norm(o.get("Name", ""))
-                return (0 if nm == ds else
-                        1 if any(k in nm for k in ("gpo", "head", "general"))
-                        else 2, -s)
-            extra.sort(key=_fb_key)
-            scored = extra + scored
-            break
+    # Discover district names from the API's own data (covers districts
+    # missing from the offline DB), then REMOVE them from the scoring
+    # locality — a district name must not dilute locality matching or let
+    # a district-named office beat the actual locality office.
+    _discover_districts(offices, _norm(address), district_keys)
+    district_words = set()
+    for _tok, ds in district_keys:
+        district_words.update(ds.split())
+    locality = [t for t in locality if t not in district_words]
 
-    out, seen_pin = [], set()
-    for s, o in scored:
-        if o["Pincode"] in seen_pin:
-            continue
-        seen_pin.add(o["Pincode"])
-        out.append({
+    dist_tokens = _distinctive(locality)
+    if not locality:
+        scored = []  # address was just district/state -> head-office fallback
+    else:
+        phrase = " ".join(locality)
+        phrase = LOCALITY_ALIASES.get(phrase, phrase)
+        tmp = []
+        for o in offices:
+            s = _score_office(o, phrase, locality,
+                              district_keys, state_keys)
+            nm = _norm(o.get("Name", ""))
+            hit = _name_hit(dist_tokens, set(nm.split()), phrase, nm)
+            tmp.append((s, hit, o))
+        # Best first; tiebreak: exact name matches, then shorter names.
+        tmp.sort(key=lambda item: (
+            -item[0],
+            0 if _norm(item[2].get("Name", "")) == phrase else 1,
+            len(_norm(item[2].get("Name", ""))),
+        ))
+        scored = tmp
+
+    any_hit = any(hit for _, hit, _ in scored)
+    confident_best = any(s >= 6 and hit for s, hit, _ in scored)
+
+    # Fallback: when no locality office matched confidently, use the
+    # district's head post office (e.g. "MG Road, Bengaluru" -> 560001).
+    # Only when a real place name matched something, or the query was just
+    # a district — never guess a district HQ for an unknown/misspelled
+    # place (the AI path handles those).
+    if not confident_best and district_keys and (any_hit or not locality):
+        head = _pick_head_office(offices, district_keys, state_keys)
+        if head is None:
+            # Last resort: ask the API directly for the district.
+            for _, ds in district_keys:
+                extra = _gather_offices([ds])
+                if extra is None:
+                    return None
+                head = _pick_head_office(extra, district_keys, state_keys)
+                if head:
+                    break
+        if head:
+            scored = [head] + scored
+
+    def _cand(s, hit, o):
+        return {
             "pincode": o["Pincode"],
             "officename": o.get("Name", "").strip(),
             "taluk": o.get("Block", ""),
             "district": o.get("District", ""),
             "state": o.get("State", ""),
             "score": s,
-            "confident": s >= 6,
-        })
+            "confident": s >= 6 and hit,
+        }
+
+    out, seen_pin = [], set()
+    # Pass 1: confident candidates first — an exact name match must never
+    # be dropped in favour of a higher-scored vague match with the same PIN
+    # (e.g. "Connaught Place" vs "New Delhi", both 110001).
+    for s, hit, o in scored:
+        if not (s >= 6 and hit):
+            continue
+        if o["Pincode"] in seen_pin:
+            continue
+        seen_pin.add(o["Pincode"])
+        out.append(_cand(s, hit, o))
         if len(out) >= 3:
             break
+    # Pass 2: fill up with the rest.
+    if len(out) < 3:
+        for s, hit, o in scored:
+            if o["Pincode"] in seen_pin:
+                continue
+            seen_pin.add(o["Pincode"])
+            out.append(_cand(s, hit, o))
+            if len(out) >= 3:
+                break
     return out
 
 
