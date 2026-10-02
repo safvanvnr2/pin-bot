@@ -33,6 +33,11 @@ APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
 DB_PATH = os.environ.get("PINCODE_DB", os.path.join("data", "pincodes.db"))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
+if TAVILY_KEY:
+    print("Tavily web search: configured.", flush=True)
+else:
+    print("NOTE: TAVILY_API_KEY not set — web search disabled.", flush=True)
 
 GRAPH = "https://graph.facebook.com/v21.0"
 
@@ -292,9 +297,4 @@ if __name__ == "__main__":
     if not GEMINI_KEY:
         print("NOTE: GEMINI_API_KEY not set — AI vision/web verification "
               "disabled; using built-in lookup only.")
-    if os.environ.get("TAVILY_API_KEY", "").strip():
-        print("Tavily web search: configured.")
-    else:
-        print("NOTE: TAVILY_API_KEY not set — web search disabled; "
-              "using postal database only.")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
