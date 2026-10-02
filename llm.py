@@ -80,17 +80,18 @@ class GeminiClient:
             return cands[0][1]
         return None
 
-    def _try_generate(self, parts, use_search, timeout):
-        """One API attempt. Returns parsed JSON, None on error,
+    def _try_generate(self, parts, use_search, timeout, json_mode=True):
+        """One API attempt. Returns parsed JSON/text, None on error,
         or 'MODEL_NOT_FOUND' on 404."""
         url = f"{API_BASE}/models/{self.model}:generateContent"
-        body = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {
+        body = {"contents": [{"parts": parts}]}
+        if json_mode:
+            body["generationConfig"] = {
                 "temperature": 0.1,
                 "response_mime_type": "application/json",
-            },
-        }
+            }
+        else:
+            body["generationConfig"] = {"temperature": 0.2}
         if use_search:
             body["tools"] = [{"google_search": {}}]
         try:
@@ -112,16 +113,18 @@ class GeminiClient:
         except (KeyError, IndexError, TypeError):
             print("Gemini: unexpected response shape.", flush=True)
             return None
+        if not json_mode:
+            return text
         parsed = _parse_json(text)
         if parsed is None:
             print(f"Gemini: non-JSON response (first 200 chars): {text[:200]}",
                   flush=True)
         return parsed
 
-    def _generate(self, parts, use_search=False, timeout=120):
+    def _generate(self, parts, use_search=False, timeout=120, json_mode=True):
         if not self.api_key:
             return None
-        result = self._try_generate(parts, use_search, timeout)
+        result = self._try_generate(parts, use_search, timeout, json_mode)
         if result != "MODEL_NOT_FOUND":
             return result
         # Model name outdated -> discover a working one and retry once.
@@ -131,7 +134,7 @@ class GeminiClient:
         if not new_model or new_model == self.model:
             return None
         self.model = new_model
-        return self._try_generate(parts, use_search, timeout)
+        return self._try_generate(parts, use_search, timeout, json_mode)
 
     # ------------------------------------------------------------------
     # Vision: extract addresses from images / documents
@@ -211,7 +214,8 @@ class GeminiClient:
     )
 
     def verify_with_search(self, address: str):
-        """Independently verify a PIN via live web search.
+        """Independently verify a PIN via live web search (falls back to
+        model knowledge if search grounding is unavailable).
 
         Returns dict(post_office, pincode, district, state, confidence,
         sources) or None when verification is impossible / API fails.
@@ -219,12 +223,19 @@ class GeminiClient:
         address = (address or "").strip()
         if not address:
             return None
-        out = self._generate(
-            [{"text": self._VERIFY_PROMPT.format(address=address)}],
-            use_search=True,
-            timeout=150,
-        )
+        prompt = self._VERIFY_PROMPT.format(address=address)
+        # Try with live web search first.
+        out = self._generate([{"text": prompt}], use_search=True, timeout=150)
         print(f"Gemini verify result: {str(out)[:250]}", flush=True)
+        if out == "MODEL_NOT_FOUND" or out is None:
+            # Search grounding may be unsupported; try model knowledge.
+            # The cross-check below still guards against hallucination.
+            print("Gemini: retrying verification without web search...",
+                  flush=True)
+            out = self._generate([{"text": prompt}], use_search=False,
+                                 timeout=150)
+            print(f"Gemini verify (no search) result: {str(out)[:250]}",
+                  flush=True)
         if not isinstance(out, dict):
             return None
         pin = str(out.get("pincode") or "").strip()

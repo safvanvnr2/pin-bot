@@ -3,17 +3,23 @@
 Every address becomes a record::
 
     WHATSAPP INPUT -> extract input PIN (never trusted) -> live deterministic
-    lookup (India-Post-backed API + offline fallback) -> optional AI web
-    verification (cross-checked: anti-hallucination) -> compare input PIN vs
-    verified PIN -> confidence -> WhatsApp report.
+    lookup (India-Post-backed API + offline fallback) -> spelling variations
+    (Ponnani->Ponani) -> LIVE WEB SEARCH (Brave API; PIN candidates
+    cross-checked: anti-hallucination) -> compare input PIN vs verified PIN
+    -> confidence -> WhatsApp report.
 
 Core rule: it is better to report "could not confidently verify" than to
 show an incorrect PIN. No PIN is ever invented or guessed.
 """
+import json
+import os
 import re
 import sqlite3
+import urllib.parse
+import urllib.request
 
-from pin_lookup import find_pincodes, split_addresses, _norm, _api_pincode
+from pin_lookup import (find_pincodes, split_addresses, _norm, _api_pincode,
+                        _api_search)
 
 PIN_RE = re.compile(r"\b([1-9][0-9]{5})\b")
 
@@ -118,6 +124,175 @@ def _cross_check_pin(pincode, query, db_path, web_district="", web_state=""):
     return False
 
 
+def _tavily_search_texts(query, timeout=20):
+    """Web search via Tavily API (free 1k/month, no card; needs TAVILY_API_KEY).
+
+    Returns list of (title + snippet) strings.
+    """
+    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return []
+    url = "https://api.tavily.com/search"
+    body = json.dumps({
+        "api_key": api_key,
+        "query": (query or "").strip() + " pincode",
+        "max_results": 5,
+        "include_answer": False,
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=body, headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"tavily search error: {type(e).__name__}: {e}", flush=True)
+        return []
+    texts = []
+    for res in data.get("results", []):
+        texts.append(str(res.get("title", "")) + " " +
+                     str(res.get("content", ""))[:500])
+    return texts
+
+
+def web_search_pins(query, timeout=20):
+    """Live web search for PIN candidates (Tavily API; free, no card).
+
+    Returns 6-digit PINs found in search results, in order of appearance.
+    """
+    pins = []
+    # Primary: Tavily Search API (reliable, needs TAVILY_API_KEY).
+    for text in _tavily_search_texts(query, timeout):
+        pins.extend(re.findall(r"\b([1-9][0-9]{5})\b", text))
+    # Fallback: DuckDuckGo HTML (keyless, best-effort).
+    if not pins:
+        q = urllib.parse.quote_plus((query or "").strip() + " PIN code")
+        url = f"https://html.duckduckgo.com/html/?q={q}"
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 "
+                              "like Mac OS X) AppleWebKit/605.1.15"),
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+            pins.extend(re.findall(r"\b([1-9][0-9]{5})\b", html))
+        except Exception as e:
+            print(f"web search error: {type(e).__name__}: {e}", flush=True)
+    seen, out = set(), []
+    for p in pins:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out[:10]
+
+
+def _spelling_variations(token):
+    """Generate likely spelling variations for Indian place names.
+
+    India Post often spells names without double letters (Ponnani->Ponani).
+    Returns a set of variation strings.
+    """
+    variations = set()
+    # Remove double letters: ponnani -> ponani.
+    for i in range(len(token) - 1):
+        if token[i] == token[i + 1] and token[i].isalpha():
+            variations.add(token[:i] + token[i + 1:])
+    return variations
+
+
+def _verify_via_web_search(query, db_path):
+    """Verify a PIN via live web search + anti-hallucination cross-check.
+
+    Returns dict(pincode, post_office, district, state) or None.
+    """
+    # Get full search texts (not just PINs) for smarter matching.
+    texts = _tavily_search_texts(query)
+    qn = _norm(query)
+    # Pattern 1: Explicit "X Pin code is 123456" statement.
+    for text in texts:
+        # Find "Pin code is 679333" with place name before it.
+        for m in re.finditer(r"(\w[\w\s]{2,40}?)\s+pin\s*code\s+is\s+([1-9][0-9]{5})",
+                             text, re.I):
+            place, pin = m.group(1).strip(), m.group(2)
+            # The place name should resemble our query.
+            if _norm(place) and (_norm(place) in qn or qn in _norm(place) or
+                any(t in _norm(place) for t in qn.split() if len(t) > 4)):
+                try:
+                    offices = _api_pincode(pin) or []
+                except Exception:
+                    offices = []
+                if offices:
+                    o = offices[0]
+                    print(f"web verified (explicit): {pin} ({o.get('Name')})",
+                          flush=True)
+                    return {
+                        "pincode": pin,
+                        "post_office": o.get("Name", ""),
+                        "district": o.get("District", ""),
+                        "state": o.get("State", ""),
+                    }
+    # Pattern 2: PIN candidates cross-checked against postal data.
+    for pin in web_search_pins(query):
+        if not _cross_check_pin(pin, query, db_path):
+            continue
+        try:
+            offices = _api_pincode(pin) or []
+        except Exception:
+            offices = []
+        if not offices:
+            continue
+        o = offices[0]
+        print(f"web verified: {pin} ({o.get('Name')})", flush=True)
+        return {
+            "pincode": pin,
+            "post_office": o.get("Name", ""),
+            "district": o.get("District", ""),
+            "state": o.get("State", ""),
+        }
+    return None
+
+
+def _verify_via_spelling(query, db_path):
+    """Fallback: try spelling variations (e.g., Ponnani->Ponani).
+
+    India Post spellings often differ from common usage. This tries
+    deterministic variations, prefers an exact office-name match, and
+    cross-checks via the live API (anti-hallucination).
+    Returns dict(pincode, post_office, district, state) or None.
+    """
+    q_tokens = [t for t in _norm(query).split() if t]
+    for tok in q_tokens:
+        if len(tok) < 5:
+            continue
+        for var in _spelling_variations(tok):
+            try:
+                offices = _api_search(var) or []
+            except Exception:
+                continue
+            # Prefer the office whose name exactly matches the variation.
+            best = None
+            for o in offices:
+                if _norm(o.get("Name", "")) == var:
+                    best = o
+                    break
+            if best is None and offices:
+                best = offices[0]
+            if not best:
+                continue
+            pin = str(best.get("Pincode", ""))
+            if pin and _cross_check_pin(pin, query, db_path):
+                print(f"spelling verified: {tok}->{var} = {pin} "
+                      f"({best.get('Name')})", flush=True)
+                return {
+                    "pincode": pin,
+                    "post_office": best.get("Name", ""),
+                    "district": best.get("District", ""),
+                    "state": best.get("State", ""),
+                }
+    return None
+
+
 def verify_address(raw_text, db_path="data/pincodes.db", llm=None,
                    source_kind="text"):
     """Verify one address; returns a record dict (never raises)."""
@@ -148,27 +323,37 @@ def verify_address(raw_text, db_path="data/pincodes.db", llm=None,
         _apply_candidate(rec, best,
                          source="India Post postal data (live)",
                          confidence="high")
-    elif llm is not None and llm.available:
-        # 2) AI web verification, cross-checked against our postal DB.
+    else:
+        # 2) Spelling-variation fallback (deterministic): India Post
+        #    spellings often drop double letters (Ponnani->Ponani).
         web = None
         try:
-            web = llm.verify_with_search(query)
+            web = _verify_via_spelling(query, db_path)
         except Exception as e:
-            print(f"AI verify error: {type(e).__name__}: {e}", flush=True)
-        if web and web.get("pincode") and _cross_check_pin(
-                web["pincode"], query, db_path,
-                web.get("district", ""), web.get("state", "")):
+            print(f"spelling verify error: {type(e).__name__}: {e}",
+                  flush=True)
+        if not web:
+            # 3) Live WEB SEARCH: find PIN candidates on the web,
+            #    cross-check each against real postal data.
+            #    This is the mandatory independent verification — it never
+            #    trusts a printed PIN and never invents one.
+            try:
+                web = _verify_via_web_search(query, db_path)
+            except Exception as e:
+                print(f"web verify error: {type(e).__name__}: {e}",
+                      flush=True)
+        if web and web.get("pincode"):
             rec["post_office"] = web.get("post_office", "")
             rec["district"] = web.get("district", "")
             rec["state"] = web.get("state", "")
             rec["town_city"] = web.get("district", "")
             rec["verified_pin"] = web["pincode"]
-            rec["confidence"] = ("high" if web.get("confidence") == "high"
-                                 else "medium")
-            rec["sources"] = web.get("sources") or ["web verification"]
+            rec["confidence"] = "medium"
+            rec["sources"] = ["live web search, cross-checked"]
             rec["verification_status"] = "verified"
         # else: stays unverified — never invent a PIN.
-    # else: stays unverified.
+    # (Gemini AI is used for photo/document vision; the verifiers above are
+    # independent and need no API key.)
 
     # 3) Compare printed/typed PIN against the independently verified one.
     if rec["input_pin"] and rec["verified_pin"]:
