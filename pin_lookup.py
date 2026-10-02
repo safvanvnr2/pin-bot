@@ -522,6 +522,29 @@ def split_addresses(message):
     return lines or ([message.strip()] if message.strip() else [])
 
 
+def split_ocr_text(text):
+    """Group OCR lines into address blocks.
+
+    A photo/document usually holds ONE address spread across lines — never
+    treat each line as its own address. Blank lines separate multiple
+    addresses; within a block, lines are joined into one address.
+    """
+    blocks = []
+    for chunk in re.split(r"\n\s*\n", text or ""):
+        lines = [ln.strip(" ,;:-") for ln in chunk.splitlines()]
+        lines = [ln for ln in lines if len(ln) >= 2]
+        if not lines:
+            continue
+        block = ", ".join(lines)
+        if len(block) >= 4:
+            blocks.append(block)
+    if not blocks:
+        flat = " ".join((text or "").split())
+        if len(flat) >= 4:
+            blocks = [flat]
+    return blocks
+
+
 def ocr_image(image_path):
     """Extract text from an address photo using Tesseract OCR."""
     try:

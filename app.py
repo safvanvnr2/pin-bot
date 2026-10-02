@@ -21,7 +21,7 @@ import requests
 from flask import Flask, request, abort
 
 from llm import GeminiClient
-from pin_lookup import split_addresses, ocr_image
+from pin_lookup import split_addresses, split_ocr_text, ocr_image
 from verifier import verify_batch, format_report, split_message
 
 app = Flask(__name__)
@@ -123,7 +123,8 @@ def _vision_or_tesseract(data: bytes, mime: str, llm):
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         text = ocr_image(path)
-        return [{"text": t, "input_pin": ""} for t in split_addresses(text)]
+        # Group lines into address blocks; don't split one address per line.
+        return [{"text": t, "input_pin": ""} for t in split_ocr_text(text)]
     except RuntimeError as e:
         raise RuntimeError(str(e))
     finally:
@@ -196,7 +197,7 @@ def handle_document(sender: str, media_id: str, mime: str, filename: str):
     elif (mime or "").lower() == "application/pdf" or \
             (filename or "").lower().endswith(".pdf"):
         text = _pdf_text_fallback(data)
-        texts = split_addresses(text)
+        texts = split_ocr_text(text)
     else:
         send_text(sender, "I can read PDF documents and photos. For other "
                           "files, please send the address as text or a photo.")
