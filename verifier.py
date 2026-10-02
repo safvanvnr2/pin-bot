@@ -133,12 +133,20 @@ def _serper_search_texts(query, timeout=20):
     api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
-    # Try the full query, then just the place name, then site-restricted
-    # searches on Indian PIN/village directories (best hamlet coverage).
+    # Kerala districts -> state (user's region; helps hamlet searches).
+    KERALA_DISTRICTS = {
+        "malappuram", "palakkad", "thrissur", "kozhikode", "kannur",
+        "kasaragod", "wayanad", "ernakulam", "idukki", "kottayam",
+        "alappuzha", "pathanamthitta", "kollam", "thiruvananthapuram",
+    }
+    # Try the full query, then smarter variations like a human would.
     queries = [(query or "").strip() + " pincode"]
     place = (query or "").split(",")[0].strip()
+    ql = (query or "").lower()
+    state_hint = " kerala" if any(d in ql for d in KERALA_DISTRICTS) else ""
     if place:
-        queries.append(place + " village pincode")
+        # Like a human: "Kodimaram village pincode Kerala"
+        queries.append(f"{place} village pincode{state_hint}")
         # Site-restricted: these directories index hamlets well.
         queries.append(f"site:indiainfo.net {place} pincode")
         queries.append(f"site:onefivenine.com {place} pincode")
