@@ -292,4 +292,9 @@ if __name__ == "__main__":
     if not GEMINI_KEY:
         print("NOTE: GEMINI_API_KEY not set — AI vision/web verification "
               "disabled; using built-in lookup only.")
+    if os.environ.get("TAVILY_API_KEY", "").strip():
+        print("Tavily web search: configured.")
+    else:
+        print("NOTE: TAVILY_API_KEY not set — web search disabled; "
+              "using postal database only.")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
