@@ -189,8 +189,36 @@ def _spelling_variations(token):
     return variations
 
 
-def _verify_via_web_search(query, db_path):
-    """Verify a PIN via live web search + anti-hallucination cross-check.
+def _ai_extract_pin(query, texts, llm):
+    """Use Gemini AI to extract the PIN from web search results.
+
+    The AI reads the snippets like a human would and returns the PIN.
+    Returns dict(pincode, district) or None.
+    """
+    if not llm or not llm.available or not texts:
+        return None
+    combined = "\n---\n".join(texts[:5])[:3000]
+    prompt = (
+        "Based on these web search results, what is the PIN code (6-digit "
+        "Indian postal code) for the place in this query?\n\n"
+        f"Query: {query}\n\nSearch results:\n{combined}\n\n"
+        'Return ONLY valid JSON: {"pincode": "123456", "district": "Name"} '
+        'or {"pincode": null} if you cannot determine it confidently.'
+    )
+    try:
+        out = llm._generate([{"text": prompt}], use_search=False, timeout=60)
+        if isinstance(out, dict) and out.get("pincode"):
+            pin = str(out["pincode"]).strip()
+            if re.fullmatch(r"[1-9][0-9]{5}", pin):
+                return {"pincode": pin,
+                        "district": str(out.get("district", ""))}
+    except Exception as e:
+        print(f"AI extract error: {type(e).__name__}: {e}", flush=True)
+    return None
+
+
+def _verify_via_web_search(query, db_path, llm=None):
+    """Verify a PIN via live web search + AI reasoning + cross-check.
 
     Returns dict(pincode, post_office, district, state) or None.
     """
@@ -220,7 +248,31 @@ def _verify_via_web_search(query, db_path):
                         "district": o.get("District", ""),
                         "state": o.get("State", ""),
                     }
-    # Pattern 2: PIN candidates cross-checked against postal data.
+    # Pattern 2: AI reasoning — Gemini reads the snippets like a human.
+    ai = _ai_extract_pin(query, texts, llm)
+    if ai and ai.get("pincode"):
+        pin = ai["pincode"]
+        try:
+            offices = _api_pincode(pin) or []
+        except Exception:
+            offices = []
+        if offices:
+            o = offices[0]
+            # Cross-check: AI's district should match, or text mentions it.
+            ai_district = _norm(ai.get("district", ""))
+            o_district = _norm(o.get("District", ""))
+            if (ai_district and ai_district == o_district) or \
+               (o_district and re.search(r"\b" + re.escape(o_district) + r"\b",
+                                         _norm(" ".join(texts)))):
+                print(f"web verified (AI): {pin} ({o.get('Name')})",
+                      flush=True)
+                return {
+                    "pincode": pin,
+                    "post_office": o.get("Name", ""),
+                    "district": o.get("District", ""),
+                    "state": o.get("State", ""),
+                }
+    # Pattern 3: PIN candidates cross-checked against postal data.
     # Use the web text's district mention to validate.
     for text in texts:
         pins = re.findall(r"\b([1-9][0-9]{5})\b", text)
@@ -331,7 +383,7 @@ def verify_address(raw_text, db_path="data/pincodes.db", llm=None,
             #    This is the mandatory independent verification — it never
             #    trusts a printed PIN and never invents one.
             try:
-                web = _verify_via_web_search(query, db_path)
+                web = _verify_via_web_search(query, db_path, llm)
             except Exception as e:
                 print(f"web verify error: {type(e).__name__}: {e}",
                       flush=True)
