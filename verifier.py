@@ -153,6 +153,8 @@ def _tavily_search_texts(query, timeout=20):
     for res in data.get("results", []):
         texts.append(str(res.get("title", "")) + " " +
                      str(res.get("content", ""))[:500])
+    if not texts:
+        print(f"tavily: no results for '{query}'", flush=True)
     return texts
 
 
@@ -162,23 +164,9 @@ def web_search_pins(query, timeout=20):
     Returns 6-digit PINs found in search results, in order of appearance.
     """
     pins = []
-    # Primary: Tavily Search API (reliable, needs TAVILY_API_KEY).
+    # Tavily Search API (reliable, needs TAVILY_API_KEY).
     for text in _tavily_search_texts(query, timeout):
         pins.extend(re.findall(r"\b([1-9][0-9]{5})\b", text))
-    # Fallback: DuckDuckGo HTML (keyless, best-effort).
-    if not pins:
-        q = urllib.parse.quote_plus((query or "").strip() + " PIN code")
-        url = f"https://html.duckduckgo.com/html/?q={q}"
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 "
-                              "like Mac OS X) AppleWebKit/605.1.15"),
-            })
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                html = r.read().decode("utf-8", errors="ignore")
-            pins.extend(re.findall(r"\b([1-9][0-9]{5})\b", html))
-        except Exception as e:
-            print(f"web search error: {type(e).__name__}: {e}", flush=True)
     seen, out = set(), []
     for p in pins:
         if p not in seen:
