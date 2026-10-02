@@ -234,7 +234,7 @@ def format_single(rec):
         if rec["district"]:
             lines.append(f"📍 District: {rec['district']}")
         if rec["state"]:
-            lines.append(f"📍 State: {rec["state"]}")
+            lines.append(f'📍 State: {rec["state"]}')
         if rec["verification_status"] == "verified":
             lines.append("✅ Status: Verified")
         lines.append(f"🔎 Confidence: {_conf_label(rec['confidence'])}")
